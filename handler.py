@@ -40,28 +40,37 @@
 
 import json
 
-from numpy import record
 from pydbzengine import BasePythonChangeHandler
+
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class CDCHandler(BasePythonChangeHandler):
 
+    def __init__(self, db_label: str = "unknown"):
+        self.db_label = db_label
+        self.logger = get_logger(f"handler.{db_label}")
+
     def handleJsonBatch(self, records):
 
-        print(f"Received {len(records)} change events")
+        self.logger.info("Received %d change events", len(records))
 
         for record in records:
 
-            print("======================")
+            self.logger.info("=" * 40)
 
-            print(record)
-            print("Topic:", record.sourceRecord().topic())
+            topic = record.sourceRecord().topic()
             event = json.loads(str(record.value()))
             payload = event["payload"]
-            print("Key:", record.key)
-            print("payload:", payload)
-            # exit()
-            print("Value:")
-            print(record.value)
 
-            print("======================")
+            self.logger.info(
+                "Topic: %s | Key: %s | Payload: %s",
+                topic,
+                record.key,
+                json.dumps(payload, indent=2),
+            )
+            self.logger.debug("Full event value: %s", record.value)
+
+            self.logger.info("=" * 40)
