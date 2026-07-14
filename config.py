@@ -1,7 +1,14 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load the project's .env file, overriding any pre-existing env vars so that
+# the project always uses its own configuration (e.g. DB_COUNT).
+load_dotenv(
+    dotenv_path=Path(__file__).resolve().parent / ".env",
+    override=True,
+)
 
 
 def _build_db_config(index: int) -> dict:
