@@ -123,14 +123,32 @@ def _map_table(topic_prefix: str, source_table: str) -> str:
     return f"{prefix}{source_table}"
 
 
+# ── Tables with composite unique keys (no 'id' column) ──────────────────────
+TABLE_UNIQUE_KEYS: dict[str, list[str]] = {
+    "admin_game_game_types": ["game_id", "game_type_id"],
+    "auth_role_permissions": ["role_id", "permission_id"],
+}
+
+
+def _get_unique_key_columns(table: str) -> list[str] | None:
+    """Return the unique-key column list for tables that lack an 'id' column."""
+    return TABLE_UNIQUE_KEYS.get(table)
+
+
 # ── SQL operations ───────────────────────────────────────────────────────────
 
 
 def _execute_insert(conn, table: str, after: dict):
-    """Insert a row; skip silently if the id already exists."""
+    """Insert a row; skip silently if a matching row already exists.
+
+    Uses the "id" column when present, otherwise falls back to the
+    table-specific unique-key columns defined in TABLE_UNIQUE_KEYS.
+    """
     record_id = after.get("id")
-    if record_id is None:
-        logger.warning("Skipping INSERT %s — no 'id' field", table)
+    unique_keys = _get_unique_key_columns(table)
+
+    if record_id is None and unique_keys is None:
+        logger.warning("Skipping INSERT %s — no unique key columns", table)
         return
 
     columns = list(after.keys())
@@ -138,53 +156,103 @@ def _execute_insert(conn, table: str, after: dict):
     placeholders = ", ".join("%s" for _ in columns)
     values = [after[c] for c in columns]
 
+    if unique_keys:
+        conflict_target = ", ".join(f'"{k}"' for k in unique_keys)
+        conflict_clause = f'ON CONFLICT ({conflict_target}) DO NOTHING'
+        pk_display = ",".join(str(after[k]) for k in unique_keys)
+    else:
+        conflict_clause = 'ON CONFLICT DO NOTHING'
+        pk_display = str(record_id)
+
     sql = (
         f'INSERT INTO "{table}" ({col_list}) '
         f"VALUES ({placeholders}) "
-        f'ON CONFLICT DO NOTHING'
+        f"{conflict_clause}"
     )
     with conn.cursor() as cur:
         cur.execute(sql, values)
-    logger.info("INSERT %s id=%s (OK)", table, record_id)
+    logger.info("INSERT %s pk=%s (OK)", table, pk_display)
 
 
 def _execute_update(conn, table: str, after: dict):
-    """Update a row by id.  Falls back to INSERT if the row doesn't exist yet."""
+    """Update a row by its unique key.  Falls back to INSERT if the row doesn't exist.
+
+    Uses the "id" column when present, otherwise falls back to the
+    table-specific unique-key columns defined in TABLE_UNIQUE_KEYS.
+    """
     record_id = after.get("id")
-    if record_id is None:
-        logger.warning("Skipping UPDATE %s — no 'id' field", table)
+    unique_keys = _get_unique_key_columns(table)
+
+    if record_id is None and unique_keys is None:
+        logger.warning("Skipping UPDATE %s — no unique key columns", table)
         return
 
-    non_pk = [c for c in after if c != "id"]
+    if unique_keys:
+        pk_columns = unique_keys
+    else:
+        pk_columns = ["id"]
+
+    non_pk = [c for c in after if c not in pk_columns]
     if not non_pk:
-        logger.info("Skipping UPDATE %s id=%s — only 'id' column present", table, record_id)
+        logger.info("Skipping UPDATE %s — only PK columns present", table)
         return
 
+    where_clause = " AND ".join(f'"{c}" = %s' for c in pk_columns)
     set_clause = ", ".join(f'"{c}" = %s' for c in non_pk)
-    values = [after[c] for c in non_pk] + [record_id]
+    values = [after[c] for c in non_pk] + [after[c] for c in pk_columns]
 
-    sql = f'UPDATE "{table}" SET {set_clause} WHERE "id" = %s'
+    pk_display = str(record_id) if not unique_keys else ",".join(
+        str(after[c]) for c in unique_keys
+    )
+
+    sql = f'UPDATE "{table}" SET {set_clause} WHERE {where_clause}'
     with conn.cursor() as cur:
         cur.execute(sql, values)
         if cur.rowcount == 0:
-            logger.info("UPDATE %s id=%s → no row, trying INSERT", table, record_id)
+            logger.info("UPDATE %s pk=%s → no row, trying INSERT", table, pk_display)
             _execute_insert(conn, table, after)
         else:
-            logger.info("UPDATE %s id=%s (%d row(s))", table, record_id, cur.rowcount)
+            logger.info("UPDATE %s pk=%s (%d row(s))", table, pk_display, cur.rowcount)
 
 
 def _execute_delete(conn, table: str, before: dict, after: dict):
-    """Delete a row by id (id is read from after, then before)."""
-    record = after or before or {}
-    record_id = record.get("id")
-    if record_id is None:
-        logger.warning("Skipping DELETE %s — no 'id' field", table)
-        return
+    """Delete a row by its unique key (id read from after, then before).
 
-    sql = f'DELETE FROM "{table}" WHERE "id" = %s'
+    Uses the "id" column when present, otherwise falls back to the
+    table-specific unique-key columns defined in TABLE_UNIQUE_KEYS.
+    """
+    record = after or before or {}
+    unique_keys = _get_unique_key_columns(table)
+
+    if unique_keys:
+        pk_columns = unique_keys
+    else:
+        record_id = record.get("id")
+        if record_id is None:
+            logger.warning("Skipping DELETE %s — no 'id' field", table)
+            return
+        pk_columns = None
+
+    if pk_columns:
+        # Use composite unique key
+        missing = [k for k in pk_columns if k not in record]
+        if missing:
+            logger.warning(
+                "Skipping DELETE %s — missing key column(s): %s", table, missing
+            )
+            return
+        where_clause = " AND ".join(f'"{c}" = %s' for c in pk_columns)
+        values = [record[c] for c in pk_columns]
+        sql = f'DELETE FROM "{table}" WHERE {where_clause}'
+        record_pk = ",".join(str(record[c]) for c in pk_columns)
+    else:
+        sql = f'DELETE FROM "{table}" WHERE "id" = %s'
+        values = (record_id,)
+        record_pk = str(record_id)
+
     with conn.cursor() as cur:
-        cur.execute(sql, (record_id,))
-        logger.info("DELETE %s id=%s (%d row(s))", table, record_id, cur.rowcount)
+        cur.execute(sql, values)
+        logger.info("DELETE %s pk=%s (%d row(s))", table, record_pk, cur.rowcount)
 
 
 # ── Handler class ────────────────────────────────────────────────────────────
