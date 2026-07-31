@@ -1,0 +1,8 @@
+.env
+compose.yml
+docker-compose.yml
+/logs
+.github/
+__pycache__
+offsets
+
