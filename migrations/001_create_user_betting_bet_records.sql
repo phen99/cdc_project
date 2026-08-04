@@ -22,7 +22,7 @@
 CREATE TABLE IF NOT EXISTS public.user_betting_bet_records (
     -- Warehouse bookkeeping (not part of the API response)
     id                          BIGSERIAL PRIMARY KEY,
-    -- synced_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    synced_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     -- ── API response fields ──────────────────────────────────────────────
     bet_ticket_no               VARCHAR(64)  NOT NULL,  -- bet_ticket_no
